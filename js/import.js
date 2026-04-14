@@ -19,6 +19,40 @@ window.AnkiImporter = (() => {
     return _SQL;
   }
 
+  // ── fzstd (zstd decompressor) — needed for Anki 2.1.50+ .anki21b files ───────
+  let _fzstdLoaded = false;
+  async function ensureFzstd() {
+    if (_fzstdLoaded || window.fzstd) { _fzstdLoaded = true; return; }
+    await new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/fzstd@0.1.1/umd/index.js';
+      s.onload = () => { _fzstdLoaded = true; res(); };
+      s.onerror = () => rej(new Error('Failed to load fzstd'));
+      document.head.appendChild(s);
+    });
+  }
+
+  // SQLite magic bytes: "SQLite format 3\0"
+  const SQLITE_MAGIC = [0x53, 0x51, 0x4c, 0x69, 0x74, 0x65, 0x20, 0x66, 0x6f, 0x72, 0x6d, 0x61, 0x74, 0x20, 0x33, 0x00];
+  function isSQLite(data) {
+    for (let i = 0; i < SQLITE_MAGIC.length; i++) {
+      if (data[i] !== SQLITE_MAGIC[i]) return false;
+    }
+    return true;
+  }
+
+  // Decompress data if it's zstd-compressed (not raw SQLite)
+  async function decompressIfNeeded(data) {
+    if (isSQLite(data)) return data;           // already raw SQLite
+    // Likely zstd (.anki21b format from Anki 2.1.50+)
+    await ensureFzstd();
+    try {
+      return fzstd.decompress(data);
+    } catch (e) {
+      throw new Error('Database decompression failed (zstd): ' + e.message);
+    }
+  }
+
   // ── ZIP extraction ────────────────────────────────────────────────────────────
   async function extractZip(file) {
     const zip = await JSZip.loadAsync(file);
@@ -158,7 +192,9 @@ window.AnkiImporter = (() => {
     if (!dbName) throw new Error('No Anki collection database found in ZIP (expected collection.anki21 etc.).');
 
     onProgress(10, 'Opening Anki database…');
-    const dbBuf = await zip.file(dbName).async('uint8array');
+    const rawBuf = await zip.file(dbName).async('uint8array');
+    // .anki21b files are zstd-compressed on top of the ZIP — decompress if needed
+    const dbBuf = await decompressIfNeeded(rawBuf);
     const db = new SQL.Database(dbBuf);
 
     // ── Media manifest ────────────────────────────────────────────────────────
